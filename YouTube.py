@@ -9,17 +9,9 @@ from PIL import Image
 
 # SETTING PAGE CONFIGURATIONS
 st.set_page_config(page_title= "Youtube Data Harvesting and Warehousing | By Paila Hemalatha",
-                   page_icon= icon,
                    layout= "wide",
                    initial_sidebar_state= "expanded")
 
-# CREATING OPTION MENU
-with st.sidebar:
-    selected = option_menu(None, ["Home","Extract & Transform","View"],
-                           icons=["house-door-fill","tools","card-text"],
-                           default_index=0,
-                           orientation="vertical"
-                           )
 
 #Connection with Mongodb and creating a new database
 client = pymongo.MongoClient("mongodb://localhost:27017")
@@ -46,12 +38,12 @@ youtube = build(
     api_service_name, api_version, developerKey=api_key)
 
 #To get the channel details
-def get_channel_stats(youtube, channel_ids):
+def get_channel_stats(channel_id):
     all_data = []
 
     request = youtube.channels().list(
         part="snippet,contentDetails,statistics",
-        id=channel_ids
+        id=channel_id
     )
     response = request.execute()
 
@@ -67,26 +59,27 @@ def get_channel_stats(youtube, channel_ids):
                 }
         all_data.append(data)
 
-    return ((all_data))
+    return all_data
 
 #To get video IDs
-def get_channel_videos(channel_ids):
+def get_channel_videos(channel_id):
     video_ids = []
     # get Uploads playlist id
-    res = youtube.channels().list(id=channel_ids,
+    res = youtube.channels().list(id=channel_id,
                                   part='contentDetails').execute()
     playlist_id = res['items'][0]['contentDetails']['relatedPlaylists']['uploads']
     next_page_token = None
 
     while True:
-        res = youtube.playlistItems().list(playlistId=playlist_id,
-                                           part='snippet',
+        request = youtube.playlistItems().list(playlistId=playlist_id,
+                                           part='contentDetails',
                                            maxResults=50,
-                                           pageToken=next_page_token).execute()
+                                           pageToken=next_page_token)
+        response = request.execute()
 
-        for i in range(len(res['items'])):
-            video_ids.append(res['items'][i]['snippet']['resourceId']['videoId'])
-        next_page_token = res.get('nextPageToken')
+        for item in response['items']:
+            video_ids.append(item['contentDetails']['videoId'])
+        next_page_token = response.get('nextPageToken')
 
         if next_page_token is None:
             break
@@ -96,16 +89,16 @@ def get_channel_videos(channel_ids):
 def get_video_details(video_ids):
     video_stats = []
 
-    for i in range(0, len(video_ids), 50):
+    for i in range(len(video_ids)):
         response = youtube.videos().list(
             part="snippet,contentDetails,statistics",
-            id=','.join(video_ids[i:i + 50])).execute()
+            id=video_ids[i]).execute()
         for video in response['items']:
             video_details = dict(Channel_name=video['snippet']['channelTitle'],
                                  Channel_id=video['snippet']['channelId'],
                                  Video_id=video['id'],
                                  Title=video['snippet']['title'],
-                                 Tags=video['snippet'].get('tags'),
+                                 Tags=str(video['snippet'].get('tags')),
                                  Thumbnail=video['snippet']['thumbnails']['default']['url'],
                                  Description=video['snippet']['description'],
                                  Published_date=video['snippet']['publishedAt'],
@@ -121,13 +114,13 @@ def get_video_details(video_ids):
     return video_stats
 
 #To get comment details
-def get_comments_details(video_ids):
+def get_comments_details(video_id):
     comment_data = []
     try:
         next_page_token = None
         while True:
             response = youtube.commentThreads().list(part="snippet,replies",
-                                                    videoId=video_ids,
+                                                    videoId=video_id,
                                                     maxResults=100,
                                                     pageToken=next_page_token).execute()
             for cmt in response['items']:
@@ -147,6 +140,33 @@ def get_comments_details(video_ids):
         pass
     return comment_data
 
+def all_comments(video_ids):
+    comments = list()
+    for video_id in video_ids:
+        comments += get_comments_details(video_id)
+    return comments
+
+def channel_names():
+    channels = list()
+    for i in db.channels.find():
+        channels.append(i['channelName'])
+    return channels
+# print(channel_names())
+
+def channel_ids():
+    ids = list()
+    for i in db.channels.find():
+        ids.append(i['Channel_id'])
+    return ids
+
+# CREATING OPTION MENU
+with st.sidebar:
+    selected = option_menu(None, ["Home","Extract & Transform","View"],
+                           icons=["house-door-fill","tools","card-text"],
+                           default_index=0,
+                           orientation="vertical"
+                           )
+
 #Home Page
 if selected == "Home":
     col1,col2 = st.columns(2,gap= 'medium')
@@ -158,7 +178,7 @@ if selected == "Home":
     col2.markdown("#   ")
 
 # EXTRACT AND TRANSFORM PAGE
-if selected == "Extract & Transform":
+elif selected == "Extract & Transform":
     tab1, tab2 = st.tabs(["$\huge 📝 EXTRACT $", "$\huge🚀 TRANSFORM $"])
 
     # EXTRACT TAB
@@ -169,34 +189,27 @@ if selected == "Extract & Transform":
             "Hint : Goto channel's home page > Right click > View page source > Find channel_id").split(',')
 
         if ch_id and st.button("Extract Data"):
-            ch_details = get_channel_details(ch_id)
-            st.write(f'#### Extracted data from :green["{ch_details[0]["Channel_name"]}"] channel')
-            st.table(ch_details)
+            if ch_id not in channel_ids():
+                ch_details = get_channel_stats(ch_id)
+                st.write(f'#### Extracted data from :green["{ch_details[0]["channelName"]}"] channel')
+                st.table(ch_details)
+            else:
+                st.info('Channel details are already available', icon="ℹ️")
 
         if st.button("Upload to MongoDB"):
             with st.spinner('Please Wait for it...'):
-                ch_details = get_channel_details(ch_id)
+                ch_details = get_channel_stats(ch_id)
                 v_ids = get_channel_videos(ch_id)
                 vid_details = get_video_details(v_ids)
+                comm_details = all_comments(v_ids)
 
+                db.channels.insert_many(ch_details)
+                db.videos.insert_many(vid_details)
 
-                def comments():
-                    com_d = []
-                    for i in v_ids:
-                        com_d += get_comments_details(i)
-                    return com_d
-
-
-                comm_details = comments()
-
-                collections1 = db.channel_details
-                collections1.insert_many(ch_details)
-
-                collections2 = db.video_details
-                collections2.insert_many(vid_details)
-
-                collections3 = db.comments_details
-                collections3.insert_many(comm_details)
+                try:
+                    db.comments_details.insert_many(comm_details)
+                except:
+                    st.warning('No comments for this channel')
                 st.success("Data Uploaded to MongoDB successfully !!")
 
 # TRANSFORM TAB
@@ -206,56 +219,43 @@ if selected == "Extract & Transform":
         ch_names = channel_names()
         user_inp = st.selectbox("Select channel", options=ch_names)
 
-#Transform TAB
-def insert_into_channels():
-    collections = db.channels
-    query = """INSERT INTO channel_details VALUES(%s,%s,%s,%s,%s,%s)"""
+        def insert_into_channels():
+            query = """INSERT INTO channel_details VALUES(%s,%s,%s,%s,%s,%s)"""
 
-    for i in collections.find({'channelName': "The Yoga Institute"}, {'_id': 0}):
-        cursor.execute(query, tuple(i.values()))
-    mydb.commit()
+            for i in db.channels.find({'channelName': user_inp}, {'_id': 0}):
+                cursor.execute(query, tuple(i.values()))
+            mydb.commit()
 
-insert_into_channels()
 
-def insert_into_videos():
-    collections1 = db.videos
-    query1 = """INSERT INTO videos
-                (channel_name,channel_id,video_id,video_title,tags,Thumbnail,video_desp,published_st,duration,
-                viewCount,likeCount,commentCount,favouriteCount,definition,caption_status)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%S)"""
+        def insert_into_videos():
+            query1 = """INSERT INTO videos VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
 
-    for i in collections1.find({"channelName" : "The Yoga Institute"},{'_id' : 0}):
-        # values = [str(val).replace("'", "''").replace('"', '""') if isinstance(val, str) else val for val in i.values()]
-        cursor.execute(query1, tuple(i.values()))
-    mydb.commit()
+            for i in db.videos.find({"Channel_name" : user_inp},{'_id' : 0}):
+                cursor.execute(query1, tuple(i.values()))
+            mydb.commit()
 
-insert_into_videos()
 
-def insert_into_comments():
-    collections1 = db.video_details
-    collections2 = db.comments_details
-    query2 = """INSERT INTO comments
-                (Comment_id,Video_id,Comment_Text,Comment_Author,Comment_Published_At)
-                VALUES(%s,%s,%s,%s,%s)"""
+        def insert_into_comments():
+            query2 = """INSERT INTO comments VALUES(%s,%s,%s,%s,%s,%s,%s)"""
 
-    for vid in collections1.find({"channelName" : 'The Yoga Institiute'},{'_id' : 0}):
-        for i in collections2.find({'Video_id': vid['Video_id']},{'_id' : 0}):
-            cursor.execute(query2,tuple(i.values()))
-        mydb.commit()
+            for vid in db.videos.find({"Channel_name" : user_inp},{'_id' : 0}):
+                for i in db.comments_details.find({'Video_id': vid['Video_id']},{'_id' : 0}):
+                    cursor.execute(query2,tuple(i.values()))
+                    mydb.commit()
 
-insert_into_comments()
 
-if st.button("SUBMIT"):
-        try:
-            insert_into_videos()
-            insert_into_channels()
-            insert_into_comments()
-            st.success("Transformation to MySQL Successful !!")
-        except:
-            st.error("Channel details already transformed !!")
+        if st.button("SUBMIT"):
+                # try:
+                    with st.spinner("Transforming MongoDB data to Sql"):
+                        insert_into_channels()
+                        insert_into_videos()
+                        insert_into_comments()
+                        st.success("Transformation to MySQL Successful !!")
+                # except:
+                #     st.error("Channel details already transformed !!")
 
 # VIEW PAGE
-if selected == "View":
+elif selected == "View":
 
     st.write("## :orange[Select any question to get Insights]")
     questions = st.selectbox('Questions',
@@ -271,7 +271,7 @@ if selected == "View":
                               '10. Which videos have the highest number of comments, and what are their corresponding channel names?'])
 
     if questions == '1. What are the names of all the videos and their corresponding channels?':
-        cursor.execute("""SELECT Video_name AS Video_name, channel_name AS Channel_Name
+        cursor.execute("""SELECT video_title AS Video_name, channel_name AS Channel_Name
                             FROM videos
                             ORDER BY channel_name""")
         df = pd.DataFrame(cursor.fetchall(), columns=cursor.column_names)
@@ -279,7 +279,7 @@ if selected == "View":
 
     elif questions == '2. Which channels have the most number of videos, and how many videos do they have?':
         cursor.execute("""SELECT channel_name AS Channel_Name, total_videos AS Total_Videos
-                            FROM channels
+                            FROM channel_details
                             ORDER BY total_videos DESC""")
         df = pd.DataFrame(cursor.fetchall(), columns=cursor.column_names)
         st.write(df)
@@ -294,9 +294,9 @@ if selected == "View":
         st.plotly_chart(fig, use_container_width=True)
 
     elif questions == '3. What are the top 10 most viewed videos and their respective channels?':
-        cursor.execute("""SELECT channel_name AS Channel_Name, Video_name AS Video_Title, View_count AS Views 
+        cursor.execute("""SELECT channel_name AS Channel_Name, Video_title AS Video_name, viewCount AS Views 
                             FROM videos
-                            ORDER BY views DESC
+                            ORDER BY Views DESC
                             LIMIT 10""")
         df = pd.DataFrame(cursor.fetchall(), columns=cursor.column_names)
         st.write(df)
@@ -310,17 +310,17 @@ if selected == "View":
         st.plotly_chart(fig, use_container_width=True)
 
     elif questions == '4. How many comments were made on each video, and what are their corresponding video names?':
-        cursor.execute("""SELECT a.video_id AS Video_id, Video_name AS Video_Title, b.Total_Comments
-                            FROM videos AS a
-                            LEFT JOIN (SELECT video_id,COUNT(comment_id) AS Total_Comments
-                            FROM comments GROUP BY video_id) AS b
-                            ON a.video_id = b.video_id
-                            ORDER BY b.Total_Comments DESC""")
+        cursor.execute("""SELECT v.video_id AS Video_id, v.Video_title AS Video_name, v.commentCount
+                            FROM videos AS v
+                            LEFT JOIN (SELECT Video_id,COUNT(Comment_id) AS Total_Comments
+                            FROM comments GROUP BY Video_id) AS c
+                            ON v.video_id = c.video_id
+                            ORDER BY c.Total_Comments DESC""")
         df = pd.DataFrame(cursor.fetchall(), columns=cursor.column_names)
         st.write(df)
 
     elif questions == '5. Which videos have the highest number of likes, and what are their corresponding channel names?':
-        cursor.execute("""SELECT channel_name AS Channel_Name,Video_name AS Title,Like_count AS Like_Count 
+        cursor.execute("""SELECT channel_name AS Channel_Name,Video_Title AS Title,Likecount AS Like_Count 
                             FROM videos
                             ORDER BY Like_count DESC
                             LIMIT 10""")
@@ -336,15 +336,15 @@ if selected == "View":
         st.plotly_chart(fig, use_container_width=True)
 
     elif questions == '6. What is the total number of likes and dislikes for each video, and what are their corresponding video names?':
-        cursor.execute("""SELECT Video_name AS Title, Like_count AS Like_count
+        cursor.execute("""SELECT video_title AS Title, Likecount AS Like_count
                             FROM videos
                             ORDER BY Like_count DESC""")
         df = pd.DataFrame(cursor.fetchall(), columns=cursor.column_names)
         st.write(df)
 
     elif questions == '7. What is the total number of views for each channel, and what are their corresponding channel names?':
-        cursor.execute("""SELECT channel_name AS Channel_Name, channel_views AS Views
-                            FROM channels
+        cursor.execute("""SELECT channel_name AS Channel_Name, views AS Views
+                            FROM channel_details
                             ORDER BY views DESC""")
         df = pd.DataFrame(cursor.fetchall(), columns=cursor.column_names)
         st.write(df)
@@ -360,7 +360,7 @@ if selected == "View":
     elif questions == '8. What are the names of all the channels that have published videos in the year 2022?':
         cursor.execute("""SELECT channel_name AS Channel_Name
                             FROM videos
-                            WHERE published_date LIKE '2022%'
+                            WHERE published_at LIKE '2022%'
                             GROUP BY channel_name
                             ORDER BY channel_name""")
         df = pd.DataFrame(cursor.fetchall(), columns=cursor.column_names)
@@ -384,7 +384,7 @@ if selected == "View":
         st.plotly_chart(fig, use_container_width=True)
 
     elif questions == '10. Which videos have the highest number of comments, and what are their corresponding channel names?':
-        cursor.execute("""SELECT channel_name AS Channel_Name,Video_id AS Video_ID,Comment_count AS Comments
+        cursor.execute("""SELECT channel_name AS Channel_Name,Video_id AS Video_ID,Commentcount AS Comments
                             FROM videos
                             ORDER BY comments DESC
                             LIMIT 10""")
@@ -398,4 +398,5 @@ if selected == "View":
                      color=cursor.column_names[0]
                      )
         st.plotly_chart(fig, use_container_width=True)
+
 
